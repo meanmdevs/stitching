@@ -45,12 +45,7 @@ RUN mkdir -p build && \
     make -j4
 
 # Install Python dependencies
-RUN pip3 install --no-cache-dir \
-    flask \
-    opencv-python \
-    pillow \
-    werkzeug \
-    numpy
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Create necessary directories
 RUN mkdir -p /app/stitched /app/input
@@ -71,3 +66,6 @@ RUN chmod +x /app/start.sh
 
 # Run the application
 CMD ["/app/start.sh"]
+
+# Alternative: Direct gunicorn command (uncomment if start.sh fails)
+# CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120", "app:app"]

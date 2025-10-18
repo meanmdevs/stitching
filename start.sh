@@ -20,7 +20,15 @@ mkdir -p /app/stitched /app/input
 # Start the application
 echo "Starting web service..."
 if [ "$FLASK_ENV" = "production" ]; then
-    exec gunicorn --bind 0.0.0.0:5000 --workers 2 --timeout 120 app:app
+    # Check if gunicorn is available
+    if command -v gunicorn &> /dev/null; then
+        echo "Starting with gunicorn..."
+        exec gunicorn --bind 0.0.0.0:5000 --workers 2 --timeout 120 app:app
+    else
+        echo "Gunicorn not found, falling back to Flask development server..."
+        exec python3 app.py
+    fi
 else
+    echo "Starting Flask development server..."
     exec python3 app.py
 fi
