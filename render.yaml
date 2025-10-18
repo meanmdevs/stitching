@@ -1,0 +1,21 @@
+services:
+    - type: web
+      name: fisheye-stitcher
+      env: docker
+      dockerfilePath: ./Dockerfile
+      plan: starter
+      region: oregon
+      branch: master
+      healthCheckPath: /health
+      envVars:
+          - key: FLASK_ENV
+            value: production
+          - key: PORT
+            value: 5000
+      scaling:
+          minInstances: 1
+          maxInstances: 3
+      disk:
+          name: fisheye-stitcher-disk
+          mountPath: /app/data
+          sizeGB: 1
