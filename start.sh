@@ -23,7 +23,7 @@ if [ "$FLASK_ENV" = "production" ]; then
     # Check if gunicorn is available
     if command -v gunicorn &> /dev/null; then
         echo "Starting with gunicorn..."
-        exec gunicorn --bind 0.0.0.0:5000 --workers 2 --timeout 120 app:app
+        exec gunicorn --bind 0.0.0.0:5000 --workers 2 --threads 4 --timeout 300 app:app
     else
         echo "Gunicorn not found, falling back to Flask development server..."
         exec python3 app.py
