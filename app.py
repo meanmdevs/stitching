@@ -10,12 +10,14 @@ import subprocess
 import tempfile
 import shutil
 from pathlib import Path
-from flask import Flask, request, jsonify, send_file, render_template_string
+from flask import Flask, request, jsonify, send_file, render_template_string, flash, redirect, url_for
 from werkzeug.utils import secure_filename
 import cv2
 import numpy as np
 from PIL import Image
 import logging
+import uuid
+import requests
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +32,115 @@ BUILD_DIR = PROJECT_ROOT / "build"
 BINARY_PATH = BUILD_DIR / "bin" / "fisheyeStitcher"
 UTILS_DIR = PROJECT_ROOT / "utils"
 MLS_MAP_PATH = UTILS_DIR / "grid_xd_yd_3840x1920.yml.gz"
+ALLOWED_EXTENSIONS = {'.dng', '.DNG'}
+MAX_DOWNLOAD_SIZE_MB = 300  # per file limit
+
+INDEX_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <title>HDR Merge from URLs</title>
+        <style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial;
+                max-width: 900px;
+                margin: 40px auto;
+            }
+            textarea {
+                width: 100%;
+                height: 200px;
+                font-family: monospace;
+            }
+            .card {
+                border: 1px solid #ddd;
+                padding: 20px;
+                border-radius: 8px;
+            }
+            .flash {
+                padding: 10px;
+                border-radius: 6px;
+                margin-bottom: 10px;
+            }
+            .danger {
+                background: #ffe5e5;
+                border: 1px solid #ff9ea0;
+            }
+            .warning {
+                background: #fff6e0;
+                border: 1px solid #ffd38a;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>HDR Merge — DNG URLs</h1>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, msg in messages %}
+                <div class="flash {{ category }}">{{ msg }}</div>
+            {% endfor %}
+        {% endif %}
+        {% endwith %}
+
+        <div class="card">
+            <form method="post">
+                <p>Enter one or more DNG file URLs (one per line):</p>
+                <textarea
+                    name="urls"
+                    placeholder="https://example.com/image1.dng
+https://example.com/image2.dng"
+                ></textarea>
+
+                <p>
+                    <label for="method">Merge method:</label>
+                    <select id="method" name="method">
+                        <option value="mean">Mean</option>
+                        <option value="median">Median</option>
+                        <option value="max">Max</option>
+                    </select>
+                </p>
+                <p><button type="submit">Merge HDR</button></p>
+            </form>
+        </div>
+    </body>
+</html>"""
+
+RESULT_TEMPLATE = """<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>HDR Merge Result</title>
+        <style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial;
+                max-width: 900px;
+                margin: 40px auto;
+            }
+            .card {
+                border: 1px solid #ddd;
+                padding: 20px;
+                border-radius: 8px;
+            }
+            img {
+                max-width: 100%;
+                height: auto;
+                display: block;
+                margin: 10px 0;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>Merged Image</h1>
+        <div class="card">
+            <p><a href="{{ result_url }}" target="_blank">Open image in new tab</a> — you can right-click to save.</p>
+            <img src="{{ result_url }}" alt="Merged result" />
+            <p style="font-size: 0.9rem; color: #666">
+                If the image doesn't render, download via the link above. Temporary working directory: <code>{{ tmpdir }}</code>
+            </p>
+            <p><a href="{{ url_for('index') }}">Merge more</a></p>
+        </div>
+    </body>
+</html>"""
 
 # HTML template for the web interface
 HTML_TEMPLATE = """
@@ -221,6 +332,32 @@ Body: image file (dual fisheye image)
 </html>
 """
 
+def find_magick_executable():
+    for cmd in ("magick", "convert"):
+        try:
+            subprocess.run([cmd, "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return cmd
+        except Exception:
+            pass
+    return None
+
+MAGICK_CMD = find_magick_executable()
+
+def download_file(url, dest_folder):
+    local_filename = dest_folder / f"{uuid.uuid4().hex}_{os.path.basename(url.split('?')[0])}"
+    headers = {"User-Agent": "HDRMerge/1.0"}
+    with requests.get(url, stream=True, headers=headers, timeout=60) as r:
+        r.raise_for_status()
+        total_size = 0
+        with open(local_filename, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    total_size += len(chunk)
+                    if total_size > MAX_DOWNLOAD_SIZE_MB * 1024 * 1024:
+                        raise ValueError(f"File exceeds {MAX_DOWNLOAD_SIZE_MB}MB limit")
+    return local_filename
+
 def ensure_binary_exists():
     """Ensure the fisheye stitcher binary exists and is built."""
     if not BINARY_PATH.exists():
@@ -392,6 +529,88 @@ def info():
             'GET /info': 'Service information'
         }
     })
+
+@app.route('/hdr-merge', methods=['GET', 'POST'])
+def hdr_merge():
+    if request.method == 'POST':
+        urls_raw = request.form.get('urls', '').strip()
+        method = request.form.get('method', 'mean').lower()
+        if not urls_raw:
+            flash("No URLs provided.", "danger")
+            return redirect(request.url)
+
+        urls = [u.strip() for u in urls_raw.splitlines() if u.strip()]
+        if not urls:
+            flash("Please enter valid DNG URLs (one per line).", "danger")
+            return redirect(request.url)
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix="hdr_merge_"))
+        saved_paths = []
+
+        try:
+            for url in urls:
+                ext = Path(url.split('?')[0]).suffix
+                if ext not in ALLOWED_EXTENSIONS:
+                    flash(f"Skipping unsupported file type: {url}", "warning")
+                    continue
+                app.logger.info(f"Downloading {url}")
+                saved_paths.append(str(download_file(url, tmp_dir)))
+
+            if len(saved_paths) == 0:
+                flash("No valid DNG URLs downloaded.", "danger")
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return redirect(request.url)
+
+            if MAGICK_CMD is None:
+                flash("ImageMagick not found. Install it and ensure 'magick' is in PATH.", "danger")
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return redirect(request.url)
+
+            output_filename = f"merged_{uuid.uuid4().hex}.jpg"
+            output_path = tmp_dir / output_filename
+
+            cmd = [MAGICK_CMD] + saved_paths + [
+                "-evaluate-sequence", method,
+                "-auto-level",
+                "-quality", "95",
+                str(output_path)
+            ]
+
+            app.logger.info("Running ImageMagick command: %s", " ".join(cmd))
+            completed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if completed.returncode != 0:
+                err = completed.stderr or completed.stdout or "ImageMagick failed"
+                print("MAGICK STDERR:", err)
+                flash(f"ImageMagick error: {err}", "danger")
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return redirect(request.url)
+
+            return render_template_string(
+                RESULT_TEMPLATE,
+                result_url=url_for('get_result_file', tmpdir=tmp_dir.name, filename=output_filename),
+                output_name=output_filename,
+                tmpdir=tmp_dir.name,
+                urls=urls
+            )
+        except Exception as e:
+            import traceback
+            print("\n\n=== ERROR TRACEBACK START ===")
+            traceback.print_exc()
+            print("=== ERROR TRACEBACK END ===\n\n")
+            flash(f"Error: {e}", "danger")
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return redirect(request.url)
+
+    return render_template_string(INDEX_TEMPLATE)
+
+
+@app.route('/result/<tmpdir>/<filename>')
+def get_result_file(tmpdir, filename):
+    safe_tmpdir = Path(tempfile.gettempdir()) / tmpdir
+    file_path = safe_tmpdir / filename
+    if not file_path.exists():
+        return "File not found", 404
+    return send_file(str(file_path), as_attachment=False, download_name=filename)
 
 if __name__ == '__main__':
     # Ensure binary exists before starting

@@ -30,6 +30,9 @@ RUN apt-get update && apt-get install -y \
     gfortran \
     wget \
     curl \
+    dcraw \
+    imagemagick \
+    libmagickcore-6.q16-6-extra || true && \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
