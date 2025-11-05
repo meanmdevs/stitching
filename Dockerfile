@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     dcraw \
     imagemagick \
-    libmagickcore-6.q16-6-extra || true && \
+    libmagickcore-6.q16-6-extra \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
