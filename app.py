@@ -752,6 +752,104 @@ def get_result_file(tmpdir, filename):
         return "File not found", 404
     return send_file(str(file_path), as_attachment=False, download_name=filename)
 
+@app.route('/hdr-merge-api', methods=['POST'])
+def hdr_merge_api():
+    """
+    API version of hdr_merge — accepts JSON payload with "images" (list of URLs)
+    and optional "method" (mean, median, etc.), then returns the final merged HDR image.
+    """
+    try:
+        data = request.get_json()
+        urls = data.get('images', [])
+        method = data.get('method', 'mean').lower()
+
+        if not urls or not isinstance(urls, list):
+            return jsonify({"error": "No valid image URLs provided"}), 400
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix="hdr_merge_api_"))
+        saved_paths = []
+
+        # Reuse your same DNG download + convert + merge logic:
+        for url in urls:
+            ext = Path(url.split('?')[0]).suffix
+            if ext not in ALLOWED_EXTENSIONS:
+                app.logger.warning(f"Skipping unsupported file type: {url}")
+                continue
+            app.logger.info(f"Downloading {url}")
+            saved_paths.append(str(download_file(url, tmp_dir)))
+
+        if not saved_paths:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return jsonify({"error": "No valid DNG files downloaded."}), 400
+
+        # Convert DNG → TIFF using dcraw (same logic as your form-based route)
+        converted_paths = []
+        for dng_path in saved_paths:
+            tiff_path = str(Path(dng_path).with_suffix('.tiff'))
+            dcraw_cmd = ['dcraw', '-c', '-w', '-T', '-6', '-q', '3', dng_path]
+            with open(tiff_path, 'wb') as f:
+                result = subprocess.run(
+                    dcraw_cmd,
+                    stdout=f,
+                    stderr=subprocess.PIPE,
+                    timeout=60
+                )
+            if result.returncode == 0 and Path(tiff_path).exists():
+                converted_paths.append(tiff_path)
+
+        if not converted_paths:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return jsonify({"error": "Failed to convert DNG to TIFF."}), 500
+
+        # Optimize TIFFs using ImageMagick
+        optimized_paths = []
+        for tiff_path in converted_paths:
+            optimized_path = str(Path(tiff_path).with_suffix('.optimized.tiff'))
+            optimize_cmd = [
+                MAGICK_CMD, tiff_path,
+                "-depth", "8",
+                "-resize", "4096x4096>",
+                "-compress", "LZW",
+                optimized_path
+            ]
+            result = subprocess.run(optimize_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            if result.returncode == 0 and Path(optimized_path).exists():
+                optimized_paths.append(optimized_path)
+                Path(tiff_path).unlink(missing_ok=True)
+            else:
+                optimized_paths.append(tiff_path)
+
+        # Merge TIFFs into HDR image using ImageMagick
+        output_filename = f"merged_{uuid.uuid4().hex}.jpg"
+        output_path = tmp_dir / output_filename
+
+        merge_cmd = [MAGICK_CMD] + optimized_paths + [
+            "-evaluate-sequence", method,
+            "-auto-level",
+            "-quality", "95",
+            str(output_path)
+        ]
+        completed = subprocess.run(
+            merge_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=180
+        )
+
+        if completed.returncode != 0 or not output_path.exists():
+            err = completed.stderr or completed.stdout or "ImageMagick merge failed"
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return jsonify({"error": err}), 500
+
+        # ✅ Return final HDR image directly
+        return send_file(output_path, mimetype='image/jpeg')
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     # Ensure binary exists before starting
     try:
