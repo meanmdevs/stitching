@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import shutil
 from pathlib import Path
-from flask import Flask, request, jsonify, send_file, render_template_string, flash, redirect, url_for
+from flask import Flask, request, jsonify, send_file, render_template_string, flash, redirect, url_for, render_template
 from werkzeug.utils import secure_filename
 import cv2
 import numpy as np
@@ -18,6 +18,13 @@ from PIL import Image
 import logging
 import uuid
 import requests
+import base64
+from io import BytesIO
+import threading
+
+# Import our filter system
+sys.path.insert(0, os.path.dirname(__file__))
+from real_estate_filters_enhanced import RealEstateFiltersEnhanced
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -37,6 +44,11 @@ if MAGICK_CMD is None:
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25MB max file size
 app.secret_key = os.environ.get("FLASK_SECRET", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.KMUFsIDTnFmyG3nMiGM6H9FNFUROf3wh7SmqJp-QV30")
+app.config['UPLOAD_FOLDER'] = '/tmp/real_estate_uploads'
+app.config['SECRET_KEY'] = 'SECRET_KEY'
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+processing_status = {}
 
 # Configuration
 PROJECT_ROOT = Path(__file__).parent
@@ -46,6 +58,44 @@ UTILS_DIR = PROJECT_ROOT / "utils"
 MLS_MAP_PATH = UTILS_DIR / "grid_xd_yd_3840x1920.yml.gz"
 ALLOWED_EXTENSIONS = {'.dng', '.DNG'}
 MAX_DOWNLOAD_SIZE_MB = 300  # per file limit
+ALLOWED_EXTENSION_ENHANCE = {'png', 'jpg', 'jpeg', 'bmp'}
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSION_ENHANCE
+
+# Filter metadata
+FILTERS_INFO = {
+    "best": [
+        {"id": "warm-sunset", "name": "Warm Sunset Combo ⭐", "desc": "Sky replacement + warm tone"},
+        {"id": "luxury", "name": "Luxury Estate", "desc": "High-end professional look"},
+        {"id": "modern", "name": "Modern Minimal", "desc": "Clean contemporary style"},
+    ],
+    "quality": [
+        {"id": "hdr-pro", "name": "HDR Pro", "desc": "Professional detail enhancement"},
+        {"id": "balanced", "name": "Balanced Pro", "desc": "All-purpose professional"},
+        {"id": "magazine", "name": "Magazine Editorial", "desc": "High-end editorial quality"},
+        {"id": "architectural", "name": "Architectural", "desc": "Sharp detailed style"},
+    ],
+    "atmosphere": [
+        {"id": "golden-hour", "name": "Golden Hour", "desc": "Sunset/sunrise glow"},
+        {"id": "warm-natural", "name": "Natural Warmth", "desc": "Inviting warmth"},
+        {"id": "cinematic", "name": "Cinematic", "desc": "Movie-like grading"},
+        {"id": "moody", "name": "Moody Dramatic", "desc": "Dark dramatic atmosphere"},
+        {"id": "twilight", "name": "Twilight Magic", "desc": "Blue hour effect"},
+    ],
+    "brightness": [
+        {"id": "crisp-clean", "name": "Crisp & Clean", "desc": "Ultra-sharp bright"},
+        {"id": "bright-airy", "name": "Bright & Airy", "desc": "Spacious light feeling"},
+        {"id": "fresh-bright", "name": "Fresh & Bright", "desc": "Energetic bright"},
+        {"id": "vibrant", "name": "Vibrant Pop", "desc": "Eye-catching colors"},
+        {"id": "soft-elegant", "name": "Soft Elegant", "desc": "Elegant sophisticated"},
+    ],
+    "sky": [
+        {"id": "sky-dramatic", "name": "Dramatic Sky", "desc": "Enhance existing sky"},
+        {"id": "sky-blue", "name": "Blue Sky Replace", "desc": "Perfect blue sky"},
+        {"id": "sky-sunset", "name": "Sunset Sky Replace", "desc": "Beautiful sunset"},
+    ]
+}
 
 INDEX_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -743,7 +793,6 @@ def hdr_merge():
 
     return render_template_string(INDEX_TEMPLATE)
 
-
 @app.route('/result/<tmpdir>/<filename>')
 def get_result_file(tmpdir, filename):
     safe_tmpdir = Path(tempfile.gettempdir()) / tmpdir
@@ -849,6 +898,197 @@ def hdr_merge_api():
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+@app.route('/enhancement')
+def enhancement():
+    return render_template('index.html')
+
+@app.route('/api/filters', methods=['GET'])
+def get_filters():
+    """Get list of available filters"""
+    return jsonify(FILTERS_INFO)
+
+@app.route('/api/upload', methods=['POST'])
+def upload_image():
+    """Handle image upload"""
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    
+    file = request.files['image']
+    
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    if not allowed_file(file.filename):
+        return jsonify({'error': 'Invalid file type. Use JPG, PNG, or BMP'}), 400
+    
+    try:
+        # Generate unique filename
+        file_id = str(uuid.uuid4())
+        filename = secure_filename(file.filename)
+        ext = filename.rsplit('.', 1)[1].lower()
+        
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}.{ext}")
+        file.save(filepath)
+        
+        # Get image info
+        img = Image.open(filepath)
+        width, height = img.size
+        file_size = os.path.getsize(filepath)
+        
+        # Convert to base64 for preview
+        img.thumbnail((800, 800), Image.Resampling.LANCZOS)
+        buffered = BytesIO()
+        img.save(buffered, format=ext.upper() if ext != 'jpg' else 'JPEG')
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        
+        return jsonify({
+            'success': True,
+            'file_id': file_id,
+            'filename': filename,
+            'width': width,
+            'height': height,
+            'size': file_size,
+            'preview': f"data:image/{ext};base64,{img_str}"
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/apply-filter', methods=['POST'])
+def apply_filter():
+    """Apply filter to image"""
+    data = request.json
+    
+    file_id = data.get('file_id')
+    filter_name = data.get('filter')
+    intensity = float(data.get('intensity', 1.0))
+    
+    if not file_id or not filter_name:
+        return jsonify({'error': 'Missing file_id or filter'}), 400
+    
+    # Find the uploaded file
+    filepath = None
+    for ext in ['jpg', 'jpeg', 'png', 'bmp']:
+        test_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}.{ext}")
+        if os.path.exists(test_path):
+            filepath = test_path
+            break
+    
+    if not filepath:
+        return jsonify({'error': 'File not found'}), 404
+    
+    # Start processing in background
+    job_id = str(uuid.uuid4())
+    processing_status[job_id] = {'status': 'processing', 'progress': 0}
+    
+    thread = threading.Thread(
+        target=process_filter,
+        args=(job_id, filepath, filter_name, intensity)
+    )
+    thread.start()
+    
+    return jsonify({
+        'success': True,
+        'job_id': job_id
+    })
+
+def process_filter(job_id, filepath, filter_name, intensity):
+    """Process filter in background thread"""
+    try:
+        processing_status[job_id]['status'] = 'processing'
+        processing_status[job_id]['progress'] = 10
+        
+        # Create filter instance
+        filters = RealEstateFiltersEnhanced(filepath)
+        
+        processing_status[job_id]['progress'] = 30
+        
+        # Filter mapping
+        filter_map = {
+            'hdr-pro': filters.apply_hdr_pro,
+            'luxury': filters.apply_luxury_estate,
+            'modern': filters.apply_modern_minimal,
+            'golden-hour': filters.apply_golden_hour,
+            'crisp-clean': filters.apply_crisp_clean,
+            'sky-dramatic': filters.apply_dramatic_sky,
+            'sky-sunset': filters.replace_sky_sunset,
+            'sky-blue': filters.replace_sky_blue,
+            'cinematic': filters.apply_cinematic,
+            'bright-airy': filters.apply_bright_airy,
+            'vibrant': filters.apply_vibrant_pop,
+            'soft-elegant': filters.apply_soft_elegance,
+            'warm-natural': filters.apply_natural_warmth,
+            'architectural': filters.apply_architectural,
+            'moody': filters.apply_moody_dramatic,
+            'magazine': filters.apply_magazine_editorial,
+            'warm-sunset': filters.apply_warm_sunset_combo,
+            'twilight': filters.apply_twilight_magic,
+            'fresh-bright': filters.apply_fresh_bright,
+            'balanced': filters.apply_balanced_pro,
+        }
+        
+        processing_status[job_id]['progress'] = 50
+        
+        # Apply filter
+        result_image = filter_map[filter_name](intensity=intensity)
+        
+        processing_status[job_id]['progress'] = 80
+        
+        # Save result
+        output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{job_id}_result.jpg")
+        result_image.save(output_path, quality=98, optimize=False)
+        
+        # Create preview
+        result_image.thumbnail((800, 800), Image.Resampling.LANCZOS)
+        buffered = BytesIO()
+        result_image.save(buffered, format='JPEG')
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        
+        processing_status[job_id] = {
+            'status': 'complete',
+            'progress': 100,
+            'preview': f"data:image/jpeg;base64,{img_str}",
+            'output_path': output_path,
+            'file_size': os.path.getsize(output_path)
+        }
+        
+    except Exception as e:
+        processing_status[job_id] = {
+            'status': 'error',
+            'error': str(e)
+        }
+
+@app.route('/api/status/<job_id>', methods=['GET'])
+def get_status(job_id):
+    """Get processing status"""
+    if job_id not in processing_status:
+        return jsonify({'error': 'Job not found'}), 404
+    
+    return jsonify(processing_status[job_id])
+
+@app.route('/api/download/<job_id>', methods=['GET'])
+def download_result(job_id):
+    """Download processed image"""
+    if job_id not in processing_status:
+        return jsonify({'error': 'Job not found'}), 404
+    
+    status = processing_status[job_id]
+    
+    if status['status'] != 'complete':
+        return jsonify({'error': 'Processing not complete'}), 400
+    
+    output_path = status['output_path']
+    
+    if not os.path.exists(output_path):
+        return jsonify({'error': 'File not found'}), 404
+    
+    return send_file(
+        output_path,
+        mimetype='image/jpeg',
+        as_attachment=True,
+        download_name='enhanced_image.jpg'
+    )
 
 if __name__ == '__main__':
     # Ensure binary exists before starting

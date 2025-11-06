@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>🏡 Real Estate Image Enhancement Pro</title>
+        <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+    </head>
+    <body>
+        <header class="header">
+            <div class="container">
+                <h1 class="logo">🏡 Real Estate Image Enhancement Pro</h1>
+                <p class="tagline">20 Professional Filters • Advanced Sky Replacement • Quality Focused</p>
+            </div>
+        </header>
+
+        <main class="main-container">
+            <div class="container">
+                <div class="grid">
+                    <aside class="sidebar">
+                        <div class="card upload-section">
+                            <h2 class="section-title">📁 Upload Image</h2>
+                            <div class="upload-area" id="uploadArea">
+                                <div class="upload-content">
+                                    <p class="upload-text">Drag & drop your image here</p>
+                                    <p class="upload-subtext">or click to browse</p>
+                                    <p class="upload-info">JPG, PNG, BMP • Max 50MB</p>
+                                </div>
+                                <input type="file" id="fileInput" accept="image/jpeg,image/jpg,image/png,image/bmp" hidden />
+                            </div>
+                            <div class="file-info" id="fileInfo" style="display: none">
+                                <p class="file-name" id="fileName"></p>
+                                <p class="file-details" id="fileDetails"></p>
+                            </div>
+                        </div>
+
+                        <div class="card filters-section">
+                            <h2 class="section-title">🎨 Select Filter</h2>
+                            <div class="filter-category">
+                                <h3 class="category-title">⭐ BEST SELLERS</h3>
+                                <div class="filter-grid" id="filters-best"></div>
+                            </div>
+                            <div class="filter-category">
+                                <h3 class="category-title">🏠 QUALITY</h3>
+                                <div class="filter-grid" id="filters-quality"></div>
+                            </div>
+                            <div class="filter-category">
+                                <h3 class="category-title">🌈 ATMOSPHERE</h3>
+                                <div class="filter-grid" id="filters-atmosphere"></div>
+                            </div>
+                            <div class="filter-category">
+                                <h3 class="category-title">☀️ BRIGHTNESS</h3>
+                                <div class="filter-grid" id="filters-brightness"></div>
+                            </div>
+                            <div class="filter-category">
+                                <h3 class="category-title">🌤️ SKY EFFECTS</h3>
+                                <div class="filter-grid" id="filters-sky"></div>
+                            </div>
+                        </div>
+
+                        <div class="card intensity-section">
+                            <h2 class="section-title">🎚️ Intensity</h2>
+                            <div class="intensity-control">
+                                <div class="intensity-header">
+                                    <span class="intensity-label">Current: <span id="intensityValue">1.0</span></span>
+                                </div>
+                                <input type="range" id="intensitySlider" min="0.5" max="2.0" step="0.1" value="1.0" class="slider" />
+                                <div class="intensity-marks">
+                                    <span>0.5</span>
+                                    <span>1.0</span>
+                                    <span>1.5</span>
+                                    <span>2.0</span>
+                                </div>
+                                <div class="intensity-presets">
+                                    <button class="preset-btn" data-value="0.7">Light</button>
+                                    <button class="preset-btn active" data-value="1.0">Normal</button>
+                                    <button class="preset-btn" data-value="1.5">Strong</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <button class="download-btn" id="downloadBtn" disabled>💾 Download Enhanced Image</button>
+                    </aside>
+
+                    <section class="preview-section">
+                        <div class="card preview-card">
+                            <h2 class="section-title">🖼️ Preview</h2>
+                            <div class="status-message" id="statusMessage" style="display: none">
+                                <div class="status-text" id="statusText">Processing...</div>
+                                <div class="progress-bar">
+                                    <div class="progress-fill" id="progressFill"></div>
+                                </div>
+                            </div>
+                            <div class="image-container" id="imageContainer">
+                                <div class="placeholder" id="placeholder">
+                                    <p class="placeholder-text">No image loaded</p>
+                                    <p class="placeholder-subtext">Upload an image to start enhancing</p>
+                                </div>
+                                <img id="previewImage" class="preview-image" style="display: none" />
+                            </div>
+                            <div class="image-info" id="imageInfo" style="display: none">
+                                <div class="info-item">
+                                    <span class="info-label">Filter:</span>
+                                    <span class="info-value" id="currentFilter">None</span>
+                                </div>
+                                <div class="info-item">
+                                    <span class="info-label">Intensity:</span>
+                                    <span class="info-value" id="currentIntensity">1.0</span>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </main>
+
+        <footer class="footer">
+            <div class="container">
+                <p>Made with ❤️ for Real Estate Professionals</p>
+            </div>
+        </footer>
+
+        <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    </body>
+</html>
