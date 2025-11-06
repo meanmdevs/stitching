@@ -23,6 +23,17 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Detect ImageMagick command (convert for older versions, magick for newer)
+MAGICK_CMD = None
+for cmd in ['convert', 'magick']:
+    if shutil.which(cmd):
+        MAGICK_CMD = cmd
+        logger.info(f"Found ImageMagick command: {cmd}")
+        break
+
+if MAGICK_CMD is None:
+    logger.warning("ImageMagick not found in PATH")
+
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25MB max file size
 app.secret_key = os.environ.get("FLASK_SECRET", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.KMUFsIDTnFmyG3nMiGM6H9FNFUROf3wh7SmqJp-QV30")
@@ -381,6 +392,44 @@ def ensure_binary_exists():
     else:
         logger.info("Binary already exists")
 
+def download_file(url, dest_dir, max_size_mb=MAX_DOWNLOAD_SIZE_MB):
+    """Download a file from URL to destination directory with size limit."""
+    try:
+        response = requests.get(url, stream=True, timeout=30)
+        response.raise_for_status()
+        
+        # Check content length
+        content_length = response.headers.get('Content-Length')
+        if content_length:
+            size_mb = int(content_length) / (1024 * 1024)
+            if size_mb > max_size_mb:
+                raise ValueError(f"File too large: {size_mb:.1f}MB (max {max_size_mb}MB)")
+        
+        # Generate unique filename
+        original_name = Path(url.split('?')[0]).name
+        unique_id = uuid.uuid4().hex[:32]
+        safe_name = f"{unique_id}_{secure_filename(original_name)}"
+        dest_path = dest_dir / safe_name
+        
+        # Download with size check
+        total_size = 0
+        max_size_bytes = max_size_mb * 1024 * 1024
+        
+        with open(dest_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    total_size += len(chunk)
+                    if total_size > max_size_bytes:
+                        dest_path.unlink(missing_ok=True)
+                        raise ValueError(f"File exceeded size limit during download")
+                    f.write(chunk)
+        
+        logger.info(f"Downloaded {url} to {dest_path} ({total_size / 1024 / 1024:.1f}MB)")
+        return dest_path
+        
+    except requests.RequestException as e:
+        raise RuntimeError(f"Failed to download {url}: {str(e)}")
+
 def validate_image(image_path):
     """Validate that the uploaded image is a valid dual fisheye image."""
     try:
@@ -567,18 +616,108 @@ def hdr_merge():
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 return redirect(request.url)
 
+            # Convert DNG files to TIFF using dcraw
+            app.logger.info(f"Converting {len(saved_paths)} DNG files to TIFF...")
+            converted_paths = []
+            
+            for dng_path in saved_paths:
+                try:
+                    # Output TIFF path
+                    tiff_path = str(Path(dng_path).with_suffix('.tiff'))
+                    
+                    # Use dcraw to convert DNG to 16-bit TIFF
+                    # -c: write to stdout
+                    # -w: use camera white balance
+                    # -T: output TIFF
+                    # -6: 16-bit output
+                    # -q 3: high quality interpolation
+                    dcraw_cmd = ['dcraw', '-c', '-w', '-T', '-6', '-q', '3', dng_path]
+                    
+                    app.logger.info(f"Converting {Path(dng_path).name} to TIFF...")
+                    
+                    with open(tiff_path, 'wb') as f:
+                        result = subprocess.run(
+                            dcraw_cmd,
+                            stdout=f,
+                            stderr=subprocess.PIPE,
+                            timeout=60
+                        )
+                    
+                    if result.returncode != 0:
+                        app.logger.error(f"dcraw failed for {dng_path}: {result.stderr.decode()}")
+                        continue
+                    
+                    if Path(tiff_path).exists() and Path(tiff_path).stat().st_size > 0:
+                        converted_paths.append(tiff_path)
+                        app.logger.info(f"Successfully converted {Path(dng_path).name}")
+                    else:
+                        app.logger.error(f"dcraw produced empty file for {dng_path}")
+                        
+                except subprocess.TimeoutExpired:
+                    app.logger.error(f"dcraw timeout for {dng_path}")
+                except Exception as e:
+                    app.logger.error(f"Error converting {dng_path}: {e}")
+            
+            if not converted_paths:
+                flash("Failed to convert any DNG files to TIFF. Check server logs.", "danger")
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return redirect(request.url)
+            
+            app.logger.info(f"Successfully converted {len(converted_paths)} files to TIFF")
+
+            # Resize TIFFs to reduce memory usage (optional but recommended)
+            # Convert 16-bit to 8-bit and resize to reasonable dimensions
+            app.logger.info("Optimizing TIFFs for merging...")
+            optimized_paths = []
+            
+            for tiff_path in converted_paths:
+                try:
+                    optimized_path = str(Path(tiff_path).with_suffix('.optimized.tiff'))
+                    
+                    # Use ImageMagick to convert to 8-bit and resize if too large
+                    optimize_cmd = [
+                        MAGICK_CMD, tiff_path,
+                        "-depth", "8",           # Convert to 8-bit (reduces file size by 50%)
+                        "-resize", "4096x4096>", # Resize if larger than 4096px (keep aspect ratio)
+                        "-compress", "LZW",      # Add compression
+                        optimized_path
+                    ]
+                    
+                    result = subprocess.run(
+                        optimize_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=30
+                    )
+                    
+                    if result.returncode == 0 and Path(optimized_path).exists():
+                        optimized_paths.append(optimized_path)
+                        # Delete original large TIFF to save space
+                        Path(tiff_path).unlink(missing_ok=True)
+                    else:
+                        # If optimization fails, use original
+                        app.logger.warning(f"Failed to optimize {tiff_path}, using original")
+                        optimized_paths.append(tiff_path)
+                        
+                except Exception as e:
+                    app.logger.error(f"Error optimizing {tiff_path}: {e}")
+                    optimized_paths.append(tiff_path)
+            
+            app.logger.info(f"Optimized {len(optimized_paths)} TIFFs for merging")
+
             output_filename = f"merged_{uuid.uuid4().hex}.jpg"
             output_path = tmp_dir / output_filename
 
-            cmd = [MAGICK_CMD] + saved_paths + [
+            # Now merge the optimized TIFF files with ImageMagick
+            cmd = [MAGICK_CMD] + optimized_paths + [
                 "-evaluate-sequence", method,
                 "-auto-level",
                 "-quality", "95",
                 str(output_path)
             ]
 
-            app.logger.info("Running ImageMagick command: %s", " ".join(cmd))
-            completed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            app.logger.info("Running ImageMagick merge command...")
+            completed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180)
             if completed.returncode != 0:
                 err = completed.stderr or completed.stdout or "ImageMagick failed"
                 print("MAGICK STDERR:", err)

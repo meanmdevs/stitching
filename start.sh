@@ -3,6 +3,20 @@
 
 echo "Starting Fisheye Stitcher Service..."
 
+# Check required tools
+if ! command -v dcraw &> /dev/null; then
+    echo "ERROR: dcraw not found. DNG processing will fail."
+    exit 1
+fi
+
+if ! command -v convert &> /dev/null && ! command -v magick &> /dev/null; then
+    echo "ERROR: ImageMagick not found."
+    exit 1
+fi
+
+echo "✓ dcraw found: $(dcraw 2>&1 | head -n1)"
+echo "✓ ImageMagick found"
+
 # Ensure the binary exists
 if [ ! -f "/app/build/bin/fisheyeStitcher" ]; then
     echo "Building fisheye stitcher binary..."
