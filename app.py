@@ -394,6 +394,16 @@ Body: image file (dual fisheye image)
 </html>
 """
 
+def create_preview(image, max_size=800):
+    """Create a preview thumbnail while preserving quality"""
+    img_copy = image.copy()
+    img_copy.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+    buffered = BytesIO()
+    # Use high quality for preview
+    img_copy.save(buffered, format='JPEG', quality=95, optimize=True)
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    return f"data:image/jpeg;base64,{img_str}"
+
 def find_magick_executable():
     for cmd in ("magick", "convert"):
         try:
@@ -901,6 +911,7 @@ def hdr_merge_api():
 
 @app.route('/enhancement')
 def enhancement():
+    """Serve the main web interface"""
     return render_template('index.html')
 
 @app.route('/api/filters', methods=['GET'])
@@ -931,16 +942,13 @@ def upload_image():
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}.{ext}")
         file.save(filepath)
         
-        # Get image info
+        # Get image info without modifying the original
         img = Image.open(filepath)
         width, height = img.size
         file_size = os.path.getsize(filepath)
         
-        # Convert to base64 for preview
-        img.thumbnail((800, 800), Image.Resampling.LANCZOS)
-        buffered = BytesIO()
-        img.save(buffered, format=ext.upper() if ext != 'jpg' else 'JPEG')
-        img_str = base64.b64encode(buffered.getvalue()).decode()
+        # Create preview only for display purposes
+        preview_data = create_preview(img, max_size=800)
         
         return jsonify({
             'success': True,
@@ -949,7 +957,7 @@ def upload_image():
             'width': width,
             'height': height,
             'size': file_size,
-            'preview': f"data:image/{ext};base64,{img_str}"
+            'preview': preview_data
         })
         
     except Exception as e:
@@ -1035,22 +1043,28 @@ def process_filter(job_id, filepath, filter_name, intensity):
         
         processing_status[job_id]['progress'] = 80
         
-        # Save result
-        output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{job_id}_result.jpg")
-        result_image.save(output_path, quality=98, optimize=False)
+        # Save result with MAXIMUM quality
+        # Use PNG for lossless quality or high-quality JPEG
+        output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{job_id}_result.png")
         
-        # Create preview
-        result_image.thumbnail((800, 800), Image.Resampling.LANCZOS)
-        buffered = BytesIO()
-        result_image.save(buffered, format='JPEG')
-        img_str = base64.b64encode(buffered.getvalue()).decode()
+        # Save as PNG for absolute maximum quality (lossless)
+        result_image.save(output_path, format='PNG', compress_level=1)
+        
+        # Also save a high-quality JPEG version for download flexibility
+        output_path_jpg = os.path.join(app.config['UPLOAD_FOLDER'], f"{job_id}_result.jpg")
+        result_image.save(output_path_jpg, format='JPEG', quality=100, subsampling=0, optimize=False)
+        
+        # Create preview for browser display (this is just for preview, not the final download)
+        preview_data = create_preview(result_image, max_size=1200)
         
         processing_status[job_id] = {
             'status': 'complete',
             'progress': 100,
-            'preview': f"data:image/jpeg;base64,{img_str}",
-            'output_path': output_path,
-            'file_size': os.path.getsize(output_path)
+            'preview': preview_data,
+            'output_path': output_path,  # PNG version (lossless)
+            'output_path_jpg': output_path_jpg,  # JPEG version
+            'file_size': os.path.getsize(output_path),
+            'file_size_jpg': os.path.getsize(output_path_jpg)
         }
         
     except Exception as e:
@@ -1078,16 +1092,26 @@ def download_result(job_id):
     if status['status'] != 'complete':
         return jsonify({'error': 'Processing not complete'}), 400
     
-    output_path = status['output_path']
+    # Get format preference from query params (default to PNG for max quality)
+    format_type = request.args.get('format', 'png').lower()
+    
+    if format_type == 'jpg' or format_type == 'jpeg':
+        output_path = status['output_path_jpg']
+        mimetype = 'image/jpeg'
+        download_name = 'enhanced_image.jpg'
+    else:
+        output_path = status['output_path']
+        mimetype = 'image/png'
+        download_name = 'enhanced_image.png'
     
     if not os.path.exists(output_path):
         return jsonify({'error': 'File not found'}), 404
     
     return send_file(
         output_path,
-        mimetype='image/jpeg',
+        mimetype=mimetype,
         as_attachment=True,
-        download_name='enhanced_image.jpg'
+        download_name=download_name
     )
 
 if __name__ == '__main__':

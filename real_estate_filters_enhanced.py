@@ -11,14 +11,13 @@ from PIL import Image, ImageEnhance, ImageFilter
 import os
 import sys
 
-
 class RealEstateFiltersEnhanced:
     """Enhanced collection of 20 professional filters for real estate photography"""
     
     def __init__(self, image_path):
         """Initialize with image path"""
         self.image_path = image_path
-        self.cv_image = cv2.imread(image_path)
+        self.cv_image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
         if self.cv_image is None:
             raise ValueError(f"Could not load image from {image_path}")
         
@@ -489,10 +488,10 @@ class RealEstateFiltersEnhanced:
         """Advanced sky replacement with better detection"""
         hsv = cv2.cvtColor(self.cv_image, cv2.COLOR_BGR2HSV)
         height, width = hsv.shape[:2]
-        
+
         # Advanced sky detection
         sky_mask = self._detect_sky_advanced(hsv, height)
-        
+
         # Create sky gradient based on type
         if sky_type == 'blue':
             sky_top = np.array([135, 206, 235]) * (0.8 + 0.2 * intensity)
@@ -506,17 +505,17 @@ class RealEstateFiltersEnhanced:
         else:
             sky_top = np.array([135, 206, 235])
             sky_bottom = np.array([200, 230, 255])
-        
+
         sky_top = np.clip(sky_top, 0, 255)
         sky_bottom = np.clip(sky_bottom, 0, 255)
-        
+
         # Create gradient
         gradient = np.zeros((height, width, 3), dtype=np.uint8)
         for i in range(height):
             ratio = (i / height) ** (1.0 / intensity)  # Intensity affects gradient curve
             color = sky_top * (1 - ratio) + sky_bottom * ratio
             gradient[i, :] = color
-        
+
         # Blend with better feathering
         sky_mask_3ch = np.stack([sky_mask] * 3, axis=2).astype(np.float32) / 255.0
         result = gradient * sky_mask_3ch + self.cv_image * (1 - sky_mask_3ch)
@@ -555,27 +554,27 @@ class RealEstateFiltersEnhanced:
         return sky_mask.astype(np.float32) / 255.0
     
     def _apply_color_temperature(self, kelvin_shift):
-        """Apply color temperature shift to PIL image"""
-        img_cv = self._pil_to_cv(self.pil_image)
+        """Apply color temperature shift to PIL image (preserves quality)"""
+        img_cv = self._pil_to_cv(self.pil_image.copy())
         result = self._apply_color_temperature_cv(img_cv, kelvin_shift)
-        return self._cv_to_pil(result)
-    
+        return Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB), mode='RGB')
+
     def _apply_color_temperature_cv(self, img, kelvin_shift):
-        """Apply color temperature to CV image"""
-        img = img.astype(np.float32)
-        
-        if kelvin_shift > 0:  # Warm
+        """Apply color temperature to CV image (float precision)"""
+        img = img.astype(np.float32) / 255.0
+
+        if kelvin_shift > 0:  # Warm tone
             factor = kelvin_shift / 100.0
-            img[:, :, 2] = np.clip(img[:, :, 2] * (1 + factor), 0, 255)  # Red
-            img[:, :, 1] = np.clip(img[:, :, 1] * (1 + factor * 0.5), 0, 255)  # Green
-            img[:, :, 0] = np.clip(img[:, :, 0] * (1 - factor * 0.2), 0, 255)  # Blue
-        else:  # Cool
+            img[:, :, 2] = np.clip(img[:, :, 2] * (1 + factor), 0, 1)  # Red
+            img[:, :, 1] = np.clip(img[:, :, 1] * (1 + factor * 0.5), 0, 1)  # Green
+            img[:, :, 0] = np.clip(img[:, :, 0] * (1 - factor * 0.2), 0, 1)  # Blue
+        else:  # Cool tone
             factor = abs(kelvin_shift) / 100.0
-            img[:, :, 0] = np.clip(img[:, :, 0] * (1 + factor), 0, 255)  # Blue
-            img[:, :, 1] = np.clip(img[:, :, 1] * (1 + factor * 0.3), 0, 255)  # Green
-            img[:, :, 2] = np.clip(img[:, :, 2] * (1 - factor * 0.2), 0, 255)  # Red
-        
-        return img.astype(np.uint8)
+            img[:, :, 0] = np.clip(img[:, :, 0] * (1 + factor), 0, 1)  # Blue
+            img[:, :, 1] = np.clip(img[:, :, 1] * (1 + factor * 0.3), 0, 1)  # Green
+            img[:, :, 2] = np.clip(img[:, :, 2] * (1 - factor * 0.2), 0, 1)  # Red
+
+        return np.clip(img * 255, 0, 255).astype(np.uint8)
     
     def _add_soft_glow(self, img, intensity):
         """Add soft glow effect"""
@@ -701,8 +700,14 @@ Examples:
         
         result_image = filter_map[args.filter](intensity=args.intensity)
         
-        # Save
-        result_image.save(output_path, quality=98, optimize=False)
+        # Save with max quality (no chroma subsampling)
+        ext = os.path.splitext(output_path)[1].lower()
+        if ext in ['.jpg', '.jpeg']:
+            result_image.save(output_path, quality=100, subsampling=0)
+        elif ext == '.webp':
+            result_image.save(output_path, quality=100, lossless=True)
+        else:
+            result_image.save(output_path, format='PNG')
         print(f"\n✓ Success! Saved to: {output_path}")
         print(f"  Original: {os.path.getsize(args.input) / (1024*1024):.2f} MB")
         print(f"  Output: {os.path.getsize(output_path) / (1024*1024):.2f} MB")
